@@ -171,6 +171,27 @@ const SERV_DEF = [
 /* base Firebase de Caprichitos precargada: así cualquier dispositivo que abre el
    link arranca sincronizado, sin tener que pegar la URL a mano en Ajustes */
 const SYNC_URL_DEFAULT = "https://caprichitos-9fa42-default-rtdb.firebaseio.com/";
+/* clave pública del proyecto (no es secreta, identifica el proyecto ante Firebase) */
+const FIREBASE_API_KEY = "AIzaSyAT-MKHhZFrY1FFiRRFCIDLoWMSVdv6FEY";
+
+const firebaseLogin = async (email, password) => {
+  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`, {
+    method: "POST", body: JSON.stringify({ email, password, returnSecureToken: true })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || "login_failed");
+  return { idToken: data.idToken, refreshToken: data.refreshToken, expiraEn: Date.now() + Number(data.expiresIn) * 1000, email: data.email };
+};
+
+const firebaseRefrescar = async (refreshToken) => {
+  const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`, {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("refresh_failed");
+  return { idToken: data.id_token, refreshToken: data.refresh_token, expiraEn: Date.now() + Number(data.expires_in) * 1000 };
+};
 
 const CONFIG_DEFAULT = {
   nombre: "Caprichitos",
@@ -245,6 +266,52 @@ function Candado({ onOk, titulo }) {
   );
 }
 
+/* ─── Login con Firebase (protege la sincronización) ─── */
+function LoginFirebase({ onOk }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(false);
+
+  const intentar = async () => {
+    if (!email.trim() || !password) return;
+    setCargando(true); setError("");
+    try {
+      const s = await firebaseLogin(email.trim(), password);
+      await onOk(s);
+    } catch {
+      setError("Email o contraseña incorrectos");
+    } finally {
+      setCargando(false);
+    }
+  };
+
+  return (
+    <div className="candado">
+      <div className="card">
+        <h2 style={{ marginBottom: 6 }}>Caprichitos</h2>
+        <p className="sub" style={{ marginBottom: 18 }}>Iniciá sesión para acceder a la agenda</p>
+        <div className="campo">
+          <label>Email</label>
+          <input type="email" value={email} autoFocus onChange={(e) => setEmail(e.target.value)} />
+        </div>
+        <div className="campo">
+          <label>Contraseña</label>
+          <input
+            type="password" value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && intentar()}
+          />
+        </div>
+        {error && <p style={{ color: "var(--peligro)", fontSize: 13, marginBottom: 12 }}>{error}</p>}
+        <button className="btn acento" style={{ width: "100%" }} disabled={cargando} onClick={intentar}>
+          {cargando ? "Entrando…" : "Entrar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ─── App principal ─── */
 function App() {
   const [datos, setDatos] = useState(null);
@@ -253,17 +320,49 @@ function App() {
   const [adminOk, setAdminOk] = useState(false);
   const [backupOculto, setBackupOculto] = useState(null);
   const [ahoraTick, setAhoraTick] = useState(Date.now());
+  const [sesion, setSesion] = useState(undefined); // undefined=verificando, null=mostrar login, objeto=logueado
   const datosRef = useRef(null);
+  const sesionRef = useRef(null);
+  const datosCargadosRef = useRef(false);
 
-  const traerRemoto = async (syncUrl) => {
+  useEffect(() => { sesionRef.current = sesion; }, [sesion]);
+
+  const traerRemoto = async (syncUrl, idToken) => {
     try {
-      const res = await fetch(`${syncUrl.replace(/\/$/, "")}/datos.json`);
+      const url = `${syncUrl.replace(/\/$/, "")}/datos.json${idToken ? `?auth=${idToken}` : ""}`;
+      const res = await fetch(url);
       if (!res.ok) return null;
       return await res.json();
     } catch { return null; }
   };
 
+  const guardarSesion = async (s) => {
+    sesionRef.current = s;
+    setSesion(s);
+    await window.storage.set("estetica-auth", s ? JSON.stringify(s) : "");
+  };
+
+  /* restaura la sesión de Firebase guardada en este dispositivo (o pide login) */
   useEffect(() => {
+    (async () => {
+      const guardado = await window.storage.get("estetica-auth");
+      if (!guardado || !guardado.value) { setSesion(null); return; }
+      try {
+        const s = JSON.parse(guardado.value);
+        if (s.expiraEn - Date.now() > 5 * 60 * 1000) {
+          sesionRef.current = s; setSesion(s);
+        } else {
+          const nueva = await firebaseRefrescar(s.refreshToken);
+          await guardarSesion({ ...nueva, email: s.email });
+        }
+      } catch { await guardarSesion(null); }
+    })();
+  }, []);
+
+  /* carga los datos (una sola vez, apenas hay sesión) y los combina con lo que haya en Firebase */
+  useEffect(() => {
+    if (!sesion || datosCargadosRef.current) return;
+    datosCargadosRef.current = true;
     (async () => {
       const guardado = await window.storage.get("estetica-datos");
       let base = guardado ? JSON.parse(guardado.value) : null;
@@ -271,7 +370,7 @@ function App() {
       const syncUrl = (base && base.config.syncUrl) || CONFIG_DEFAULT.syncUrl;
 
       if (syncUrl) {
-        const remoto = await traerRemoto(syncUrl);
+        const remoto = await traerRemoto(syncUrl, sesion.idToken);
         if (remoto) {
           remoto.config = { ...CONFIG_DEFAULT, ...remoto.config };
           base = !base ? remoto
@@ -291,19 +390,33 @@ function App() {
       const bOculto = await window.storage.get("estetica-backup-oculto-hasta");
       if (bOculto) setBackupOculto(bOculto.value);
     })();
-  }, []);
+  }, [sesion]);
 
   useEffect(() => {
     const id = setInterval(() => setAhoraTick(Date.now()), 60000);
     return () => clearInterval(id);
   }, []);
 
+  /* renueva el token antes de que venza (dura 1 hora); si falla, hay que loguearse de nuevo */
+  useEffect(() => {
+    if (!sesion) return;
+    const id = setInterval(async () => {
+      const actual = sesionRef.current;
+      if (!actual || actual.expiraEn - Date.now() > 5 * 60 * 1000) return;
+      try {
+        const nueva = await firebaseRefrescar(actual.refreshToken);
+        await guardarSesion({ ...nueva, email: actual.email });
+      } catch { await guardarSesion(null); }
+    }, 4 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [sesion && sesion.refreshToken]);
+
   /* trae lo último de otros dispositivos cada tanto, sin pisar cambios más nuevos hechos acá */
   useEffect(() => {
     const syncUrl = datos && datos.config.syncUrl;
     if (!syncUrl) return;
     const id = setInterval(async () => {
-      const remoto = await traerRemoto(syncUrl);
+      const remoto = await traerRemoto(syncUrl, sesionRef.current && sesionRef.current.idToken);
       const actual = datosRef.current;
       if (remoto && actual && (remoto.mod || 0) > (actual.mod || 0)) {
         remoto.config = { ...CONFIG_DEFAULT, ...remoto.config };
@@ -321,12 +434,23 @@ function App() {
     setDatos(nuevo);
     datosRef.current = nuevo;
     window.storage.set("estetica-datos", JSON.stringify(nuevo));
-    if (nuevo.config.syncUrl) {
-      fetch(`${nuevo.config.syncUrl.replace(/\/$/, "")}/datos.json`, {
+    const token = sesionRef.current && sesionRef.current.idToken;
+    if (nuevo.config.syncUrl && token) {
+      fetch(`${nuevo.config.syncUrl.replace(/\/$/, "")}/datos.json?auth=${token}`, {
         method: "PUT", body: JSON.stringify(nuevo)
       }).catch(() => {});
     }
   };
+
+  if (sesion === undefined) return <div className="app"><style>{css}</style><div className="vacio">Cargando…</div></div>;
+
+  if (sesion === null) {
+    return (
+      <div className="app"><style>{css}</style>
+        <LoginFirebase onOk={guardarSesion} />
+      </div>
+    );
+  }
 
   if (!datos) return <div className="app"><style>{css}</style><div className="vacio">Cargando…</div></div>;
 
@@ -429,7 +553,8 @@ function App() {
         )}
         {tab === "ajustes" && (
           adminAplica
-            ? <VistaAjustes datos={datos} guardar={guardar} exportarBackup={exportarBackup} importarBackup={importarBackup} />
+            ? <VistaAjustes datos={datos} guardar={guardar} exportarBackup={exportarBackup} importarBackup={importarBackup}
+                cuentaEmail={sesion.email} onCerrarSesion={() => guardarSesion(null)} />
             : <Candado titulo="Ajustes" onOk={async (c) => {
                 if (c !== config.claveAdmin) return false;
                 setAdminOk(true);
@@ -773,7 +898,7 @@ function VistaClientes({ datos, guardar }) {
 }
 
 /* ─── Vista Ajustes ─── */
-function VistaAjustes({ datos, guardar, exportarBackup, importarBackup }) {
+function VistaAjustes({ datos, guardar, exportarBackup, importarBackup, cuentaEmail, onCerrarSesion }) {
   const { config } = datos;
   const [form, setForm] = useState(config);
   const [nuevoProf, setNuevoProf] = useState("");
@@ -809,6 +934,14 @@ function VistaAjustes({ datos, guardar, exportarBackup, importarBackup }) {
 
   return (
     <div>
+      <div className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div>
+          <h3 style={{ marginBottom: 4 }}>Cuenta</h3>
+          <div className="sub">Conectado como {cuentaEmail}</div>
+        </div>
+        <button className="link" onClick={onCerrarSesion}>Cerrar sesión</button>
+      </div>
+
       <div className="card">
         <h3 style={{ marginBottom: 14 }}>Negocio</h3>
         <div className="campo"><label>Nombre</label><input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} /></div>
