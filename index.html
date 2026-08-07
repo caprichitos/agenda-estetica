@@ -110,7 +110,8 @@ h1,h2,h3{font-family:'Fraunces',serif}
 .candado .card{max-width:340px;width:100%;text-align:center}
 .candado input{text-align:center;font-size:22px;letter-spacing:4px}
 .lista-cli{display:flex;flex-direction:column;gap:8px}
-.cli-item{display:flex;justify-content:space-between;align-items:center;background:var(--tarjeta);border:1px solid var(--linea);border-radius:14px;padding:12px 14px}
+.cli-item{display:flex;justify-content:space-between;align-items:center;background:var(--tarjeta);border:1px solid var(--linea);border-radius:14px;padding:12px 14px;cursor:pointer}
+.cli-item:hover{border-color:var(--acento)}
 .cli-item .nombre{font-weight:700;font-size:14.5px}
 .cli-item .det{color:var(--tinta2);font-size:13px}
 .sug{padding:9px 12px;border-bottom:1px solid var(--linea);cursor:pointer;font-size:14px}
@@ -118,6 +119,10 @@ h1,h2,h3{font-family:'Fraunces',serif}
 .sug:hover{background:var(--acento-suave)}
 .sug .det{font-weight:400;color:var(--tinta2);font-size:12.5px}
 .profesional-chip{display:flex;justify-content:space-between;align-items:center;background:var(--acento-suave);border-radius:10px;padding:8px 12px;margin-bottom:6px;font-size:14px}
+.espera-item{background:var(--tarjeta);border:1px solid var(--linea);border-radius:14px;padding:12px 14px;margin-bottom:8px}
+.espera-item .ei-nombre{font-weight:700;font-size:14.5px}
+.espera-item .ei-det{color:var(--tinta2);font-size:13px;margin-top:2px}
+.espera-item .ei-acciones{display:flex;gap:6px;margin-top:10px}
 @media(max-width:560px){.titulo{font-size:24px}}
 `;
 
@@ -207,7 +212,7 @@ const CONFIG_DEFAULT = {
   syncUrl: SYNC_URL_DEFAULT
 };
 
-const DATOS_DEFAULT = { clientes: [], turnos: [], config: CONFIG_DEFAULT };
+const DATOS_DEFAULT = { clientes: [], turnos: [], esperas: [], config: CONFIG_DEFAULT };
 
 /* al sincronizar, un turno queda "recordado" si cualquiera de los dos dispositivos
    ya envió el WhatsApp, para no perder ese estado al fusionar */
@@ -320,6 +325,7 @@ function App() {
   const [adminOk, setAdminOk] = useState(false);
   const [backupOculto, setBackupOculto] = useState(null);
   const [ahoraTick, setAhoraTick] = useState(Date.now());
+  const [conversion, setConversion] = useState(null);
   const [sesion, setSesion] = useState(undefined); // undefined=verificando, null=mostrar login, objeto=logueado
   const datosRef = useRef(null);
   const sesionRef = useRef(null);
@@ -540,14 +546,33 @@ function App() {
         <div className="tabs">
           <button className={`tab ${tab === "agenda" ? "on" : ""}`} onClick={() => setTab("agenda")}>Agenda</button>
           <button className={`tab ${tab === "clientes" ? "on" : ""}`} onClick={() => setTab("clientes")}>Clientes</button>
+          <button className={`tab ${tab === "espera" ? "on" : ""}`} onClick={() => setTab("espera")}>
+            Espera {(datos.esperas || []).length > 0 && <span className="n">{datos.esperas.length}</span>}
+          </button>
           <button className={`tab ${tab === "recordatorios" ? "on" : ""}`} onClick={() => setTab("recordatorios")}>
             Recordatorios {pendientes.length > 0 && <span className="n">{pendientes.length}</span>}
           </button>
           <button className={`tab ${tab === "ajustes" ? "on" : ""}`} onClick={() => setTab("ajustes")}>Ajustes</button>
         </div>
 
-        {tab === "agenda" && <VistaAgenda datos={datos} guardar={guardar} clienteDe={clienteDe} enviarWsp={enviarWsp} />}
+        {tab === "agenda" && (
+          <VistaAgenda
+            datos={datos} guardar={guardar} clienteDe={clienteDe} enviarWsp={enviarWsp}
+            conversion={conversion}
+            onConversionHecha={() => {
+              guardar({ ...datosRef.current, esperas: (datosRef.current.esperas || []).filter((e) => e.id !== conversion.id) });
+              setConversion(null);
+            }}
+            onCancelarConversion={() => setConversion(null)}
+          />
+        )}
         {tab === "clientes" && <VistaClientes datos={datos} guardar={guardar} />}
+        {tab === "espera" && (
+          <VistaEspera
+            datos={datos} guardar={guardar} clienteDe={clienteDe}
+            onConvertir={(e) => { setConversion(e); setTab("agenda"); }}
+          />
+        )}
         {tab === "recordatorios" && (
           <VistaRecordatorios pendientes={pendientes} clienteDe={clienteDe} enviarWsp={enviarWsp} />
         )}
@@ -567,7 +592,7 @@ function App() {
 }
 
 /* ─── Vista Agenda: día / semana / mes ─── */
-function VistaAgenda({ datos, guardar, clienteDe, enviarWsp }) {
+function VistaAgenda({ datos, guardar, clienteDe, enviarWsp, conversion, onConversionHecha, onCancelarConversion }) {
   const { clientes, turnos, config } = datos;
   const servicios = config.servicios || SERV_DEF;
   const profesionales = config.profesionales || [];
@@ -581,6 +606,10 @@ function VistaAgenda({ datos, guardar, clienteDe, enviarWsp }) {
 
   const cerrado = (iso) => diaCerrado(iso, config.diasCerrados);
   const turnosDe = (fecha) => turnos.filter((t) => t.fecha === fecha && !t.cancelado).sort((a, b) => a.hora.localeCompare(b.hora));
+
+  useEffect(() => {
+    if (conversion) { setVista("dia"); setEditId(null); setMostrarForm(true); }
+  }, [conversion]);
 
   const mover = (dir) => {
     if (vista === "mes") {
@@ -598,7 +627,10 @@ function VistaAgenda({ datos, guardar, clienteDe, enviarWsp }) {
 
   const irADia = (fecha) => { setFechaSel(fecha); setVista("dia"); setMostrarForm(false); setEditId(null); };
   const empezarEdicion = (t) => { setEditId(t.id); setMostrarForm(true); };
-  const cerrarForm = () => { setMostrarForm(false); setEditId(null); };
+  const cerrarForm = () => {
+    setMostrarForm(false); setEditId(null);
+    if (conversion && onCancelarConversion) onCancelarConversion();
+  };
 
   const guardarTurno = (turno) => {
     let cs = clientes;
@@ -614,8 +646,9 @@ function VistaAgenda({ datos, guardar, clienteDe, enviarWsp }) {
       guardar({ ...datos, clientes: cs, turnos: turnos.map((t) => t.id === editId ? { ...t, ...turno, recordado: cambioHorario ? false : t.recordado } : t) });
     } else {
       guardar({ ...datos, clientes: cs, turnos: [...turnos, { ...turno, id: uid(), recordado: false }] });
+      if (conversion && onConversionHecha) onConversionHecha();
     }
-    cerrarForm();
+    setMostrarForm(false); setEditId(null);
   };
 
   const cancelarTurno = () => {
@@ -669,7 +702,7 @@ function VistaAgenda({ datos, guardar, clienteDe, enviarWsp }) {
           {mostrarForm && (
             <FormTurno
               clientes={clientes} profesionales={profesionales} servicios={servicios} horas={horas}
-              turno={turnoEditando} fecha={fechaSel}
+              turno={turnoEditando} inicial={!editId ? conversion : null} fecha={fechaSel}
               onGuardar={guardarTurno} onCancelar={editId ? cancelarTurno : null} onCerrar={cerrarForm}
             />
           )}
@@ -724,12 +757,13 @@ function VistaAgenda({ datos, guardar, clienteDe, enviarWsp }) {
   );
 }
 
-function FormTurno({ clientes, profesionales, servicios, horas, turno, fecha, onGuardar, onCancelar, onCerrar }) {
-  const [busqueda, setBusqueda] = useState(turno ? (clientes.find((c) => c.id === turno.clienteId)?.nombre || "") : "");
-  const [clienteId, setClienteId] = useState(turno ? (turno.clienteId || "") : "");
+function FormTurno({ clientes, profesionales, servicios, horas, turno, inicial, fecha, onGuardar, onCancelar, onCerrar }) {
+  const seed = turno || inicial || null;
+  const [busqueda, setBusqueda] = useState(seed ? (clientes.find((c) => c.id === seed.clienteId)?.nombre || "") : "");
+  const [clienteId, setClienteId] = useState(seed ? (seed.clienteId || "") : "");
   const [telefonoNuevo, setTelefonoNuevo] = useState("");
   const [hora, setHora] = useState(turno ? turno.hora : (horas[0] || "10:00"));
-  const [serviciosSel, setServiciosSel] = useState(turno ? (turno.servicios || []) : []);
+  const [serviciosSel, setServiciosSel] = useState(seed ? (seed.servicios || []) : []);
   const [profesionalId, setProfesionalId] = useState(turno ? (turno.profesionalId || "") : "");
 
   const clienteElegido = clientes.find((c) => c.id === clienteId);
@@ -844,6 +878,7 @@ function VistaClientes({ datos, guardar }) {
   const { clientes, turnos } = datos;
   const [busqueda, setBusqueda] = useState("");
   const [mostrarForm, setMostrarForm] = useState(false);
+  const [editId, setEditId] = useState(null);
   const [nombre, setNombre] = useState("");
   const [telefono, setTelefono] = useState("");
   const [notas, setNotas] = useState("");
@@ -852,10 +887,18 @@ function VistaClientes({ datos, guardar }) {
     .filter((c) => c.nombre.toLowerCase().includes(busqueda.toLowerCase()))
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
 
-  const agregar = () => {
+  const abrirNuevo = () => { setEditId(null); setNombre(""); setTelefono(""); setNotas(""); setMostrarForm(true); };
+  const abrirEdicion = (c) => { setEditId(c.id); setNombre(c.nombre); setTelefono(c.telefono || ""); setNotas(c.notas || ""); setMostrarForm(true); };
+  const cerrarForm = () => { setMostrarForm(false); setEditId(null); };
+
+  const guardarCliente = () => {
     if (!nombre.trim()) return;
-    guardar({ ...datos, clientes: [...clientes, { id: uid(), nombre: nombre.trim(), telefono, notas }] });
-    setNombre(""); setTelefono(""); setNotas(""); setMostrarForm(false);
+    if (editId) {
+      guardar({ ...datos, clientes: clientes.map((c) => c.id === editId ? { ...c, nombre: nombre.trim(), telefono, notas, provisional: false } : c) });
+    } else {
+      guardar({ ...datos, clientes: [...clientes, { id: uid(), nombre: nombre.trim(), telefono, notas }] });
+    }
+    cerrarForm();
   };
 
   const eliminar = (id) => {
@@ -863,6 +906,7 @@ function VistaClientes({ datos, guardar }) {
       if (!confirm("Este cliente tiene turnos activos. ¿Eliminar de todos modos?")) return;
     }
     guardar({ ...datos, clientes: clientes.filter((c) => c.id !== id) });
+    if (editId === id) cerrarForm();
   };
 
   return (
@@ -870,7 +914,7 @@ function VistaClientes({ datos, guardar }) {
       <div className="campo">
         <input placeholder="Buscar cliente…" value={busqueda} onChange={(e) => setBusqueda(e.target.value)} />
       </div>
-      <button className="btn acento" style={{ marginBottom: 16 }} onClick={() => setMostrarForm(!mostrarForm)}>
+      <button className="btn acento" style={{ marginBottom: 16 }} onClick={() => mostrarForm ? cerrarForm() : abrirNuevo()}>
         {mostrarForm ? "Cerrar" : "+ Nuevo cliente"}
       </button>
       {mostrarForm && (
@@ -878,21 +922,129 @@ function VistaClientes({ datos, guardar }) {
           <div className="campo"><label>Nombre</label><input value={nombre} onChange={(e) => setNombre(e.target.value)} /></div>
           <div className="campo"><label>Teléfono</label><input value={telefono} onChange={(e) => setTelefono(e.target.value)} /></div>
           <div className="campo"><label>Notas</label><textarea value={notas} onChange={(e) => setNotas(e.target.value)} rows={2} /></div>
-          <button className="btn acento" style={{ width: "100%" }} onClick={agregar}>Guardar cliente</button>
+          <div className="fila">
+            <button className="btn acento" style={{ flex: 2 }} onClick={guardarCliente}>{editId ? "Guardar cambios" : "Guardar cliente"}</button>
+            {editId && <button className="btn peligro" onClick={() => eliminar(editId)}>Eliminar</button>}
+          </div>
         </div>
       )}
       {filtrados.length === 0 && <div className="vacio">No hay clientes.</div>}
       <div className="lista-cli">
         {filtrados.map((c) => (
-          <div className="cli-item" key={c.id}>
+          <div className="cli-item" key={c.id} onClick={() => abrirEdicion(c)}>
             <div>
               <div className="nombre">{c.nombre}</div>
               <div className="det">{c.telefono || "sin teléfono"}{c.notas ? ` · ${c.notas}` : ""}</div>
             </div>
-            <button className="link" onClick={() => eliminar(c.id)}>Eliminar</button>
+            <button className="link" onClick={(e) => { e.stopPropagation(); eliminar(c.id); }}>Eliminar</button>
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/* ─── Vista Lista de espera ─── */
+function VistaEspera({ datos, guardar, clienteDe, onConvertir }) {
+  const { clientes } = datos;
+  const esperas = datos.esperas || [];
+  const servicios = datos.config.servicios || SERV_DEF;
+  const [mostrarForm, setMostrarForm] = useState(false);
+  const [busqueda, setBusqueda] = useState("");
+  const [clienteId, setClienteId] = useState("");
+  const [telefonoNuevo, setTelefonoNuevo] = useState("");
+  const [serviciosSel, setServiciosSel] = useState([]);
+  const [notas, setNotas] = useState("");
+
+  const clienteElegido = clientes.find((c) => c.id === clienteId);
+  const sugerencias = busqueda.length > 0 && !clienteElegido
+    ? clientes.filter((c) => c.nombre.toLowerCase().includes(busqueda.toLowerCase())).slice(0, 5)
+    : [];
+  const toggleServicio = (id) => setServiciosSel((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+
+  const limpiarForm = () => { setBusqueda(""); setClienteId(""); setTelefonoNuevo(""); setServiciosSel([]); setNotas(""); };
+
+  const agregar = () => {
+    if (!clienteElegido && busqueda.trim() === "") return;
+    let cs = clientes;
+    let clienteFinalId = clienteElegido ? clienteElegido.id : null;
+    if (!clienteElegido) {
+      const nuevoCliente = { id: uid(), nombre: busqueda.trim(), telefono: telefonoNuevo || "", provisional: true };
+      cs = [...clientes, nuevoCliente];
+      clienteFinalId = nuevoCliente.id;
+    }
+    const nuevaEspera = { id: uid(), clienteId: clienteFinalId, servicios: serviciosSel, notas: notas.trim(), fecha: hoyISO() };
+    guardar({ ...datos, clientes: cs, esperas: [...esperas, nuevaEspera] });
+    limpiarForm();
+    setMostrarForm(false);
+  };
+
+  const quitar = (id) => guardar({ ...datos, esperas: esperas.filter((e) => e.id !== id) });
+
+  return (
+    <div>
+      <button className="btn acento" style={{ marginBottom: 16 }} onClick={() => { setMostrarForm(!mostrarForm); limpiarForm(); }}>
+        {mostrarForm ? "Cerrar" : "+ Agregar a la lista"}
+      </button>
+      {mostrarForm && (
+        <div className="card">
+          <div className="campo">
+            <label>Cliente</label>
+            <input
+              value={clienteElegido ? clienteElegido.nombre : busqueda}
+              onChange={(e) => { setBusqueda(e.target.value); setClienteId(""); }}
+              placeholder="Buscar o escribir nombre nuevo"
+            />
+            {sugerencias.length > 0 && (
+              <div style={{ border: "1px solid var(--linea)", borderRadius: 10, marginTop: 4, overflow: "hidden" }}>
+                {sugerencias.map((c) => (
+                  <div className="sug" key={c.id} onClick={() => { setClienteId(c.id); setBusqueda(c.nombre); }}>
+                    {c.nombre} <div className="det">{c.telefono}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {!clienteElegido && busqueda.trim() !== "" && (
+            <div className="campo">
+              <label>Teléfono (para WhatsApp)</label>
+              <input value={telefonoNuevo} onChange={(e) => setTelefonoNuevo(e.target.value)} placeholder="Ej: 1122334455" />
+            </div>
+          )}
+          <div className="campo">
+            <label>Servicios que quiere (opcional)</label>
+            <div className="servchips">
+              {servicios.map((s) => (
+                <button key={s.id} type="button" className={"schip" + (serviciosSel.includes(s.id) ? " on" : "")} onClick={() => toggleServicio(s.id)}>
+                  {s.nombre}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="campo">
+            <label>Notas</label>
+            <textarea value={notas} onChange={(e) => setNotas(e.target.value)} rows={2} placeholder="Ej: prefiere sábados a la tarde" />
+          </div>
+          <button className="btn acento" style={{ width: "100%" }} onClick={agregar}>Agregar a la lista</button>
+        </div>
+      )}
+      {esperas.length === 0 && <div className="vacio">No hay nadie en la lista de espera.</div>}
+      {esperas.map((e) => {
+        const c = clienteDe(e);
+        return (
+          <div className="espera-item" key={e.id}>
+            <div className="ei-nombre">{c ? c.nombre : "(cliente eliminado)"}</div>
+            <div className="ei-det">
+              {e.servicios && e.servicios.length > 0 ? labelDe(e, servicios) : "Sin servicio especificado"}
+              {e.notas ? ` · ${e.notas}` : ""}
+            </div>
+            <div className="ei-acciones">
+              <button className="btn mini acento" onClick={() => onConvertir(e)}>Convertir en turno</button>
+              <button className="btn mini fantasma" onClick={() => quitar(e.id)}>Quitar</button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
